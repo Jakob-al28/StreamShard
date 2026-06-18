@@ -1,0 +1,114 @@
+import http from "k6/http";
+import exec from "k6/execution";
+import { Counter, Trend } from "k6/metrics";
+
+const committed = new Counter("committed_writes");
+const rejected  = new Counter("rejected_writes");
+const rej429    = new Counter("rejected_429");
+const rej503    = new Counter("rejected_503");
+const rejOther  = new Counter("rejected_other");
+const writeLat  = new Trend("write_latency_ms", true);
+
+const BASE_URL  = __ENV.BASE_URL  || "http://localhost:7070";
+
+const BASE_URL2 = __ENV.BASE_URL2 || "";
+const MAX_RPS   = parseInt(__ENV.MAX_RPS || "100000");
+const STEPS     = parseInt(__ENV.STEPS   || "20");
+const STEP_S    = parseInt(__ENV.STEP_S  || "10");
+
+// 4s request timeout (SLA): a write that does not commit within 4s is a failure
+const PARAMS = { headers: { "Content-Type": "application/json" }, timeout: "4s" };
+
+const stages = [];
+for (let i = 1; i <= STEPS; i++) {
+  stages.push({ target: Math.floor((MAX_RPS * i) / STEPS), duration: `${STEP_S}s` });
+}
+
+const thresholds = {};
+for (let i = 0; i < STEPS; i++) {
+  thresholds[`committed_writes{step:${i}}`] = ["count>=0"];
+  thresholds[`rejected_writes{step:${i}}`]  = ["count>=0"];
+  thresholds[`rejected_429{step:${i}}`]     = ["count>=0"];
+  thresholds[`rejected_503{step:${i}}`]     = ["count>=0"];
+  thresholds[`rejected_other{step:${i}}`]   = ["count>=0"];
+  thresholds[`write_latency_ms{step:${i}}`] = ["max>=0"];
+}
+
+export const options = {
+  discardResponseBodies: true,
+  thresholds,
+  scenarios: {
+    sweep: {
+      executor: "ramping-arrival-rate",
+      startRate: Math.floor(MAX_RPS / STEPS),
+      timeUnit: "1s",
+      preAllocatedVUs: 2000,
+      maxVUs: 30000,
+      stages,
+    },
+  },
+};
+
+function currentStep() {
+  const s = Math.floor(exec.scenario.progress * STEPS);
+  return s >= STEPS ? STEPS - 1 : s;
+}
+
+export default function () {
+  const base = (BASE_URL2 && (exec.vu.idInTest % 2 === 1)) ? BASE_URL2 : BASE_URL;
+  const id = `${exec.vu.idInTest}-${__ITER}`;
+  const body = JSON.stringify({ id, key: id, value: { ts: 0 } });
+  const res = http.post(`${base}/events`, body, PARAMS);
+
+  const tags = { step: String(currentStep()) };
+  if (res.status === 200 || res.status === 201) {
+    committed.add(1, tags);
+    writeLat.add(res.timings.duration, tags);
+  } else {
+    rejected.add(1, tags);
+    if (res.status === 429) {
+      rej429.add(1, tags);
+    } else if (res.status === 503) {
+      rej503.add(1, tags);
+    } else {
+      rejOther.add(1, tags);
+    }
+  }
+}
+
+export function handleSummary(data) {
+  const m = data.metrics;
+  const val = (name, field) => (m[name] && m[name].values[field] !== undefined ? m[name].values[field] : 0);
+
+  const curve = [];
+  for (let i = 0; i < STEPS; i++) {
+    const offered = Math.floor((MAX_RPS * (i + 1)) / STEPS);
+    curve.push({
+      offered_rps:   offered,
+      committed_rps: val(`committed_writes{step:${i}}`, "count") / STEP_S,
+      rejected_rps:  val(`rejected_writes{step:${i}}`,  "count") / STEP_S,
+      rej429_rps:    val(`rejected_429{step:${i}}`,     "count") / STEP_S,
+      rej503_rps:    val(`rejected_503{step:${i}}`,     "count") / STEP_S,
+      rej_other_rps: val(`rejected_other{step:${i}}`,   "count") / STEP_S,
+      mean_lat_ms:   val(`write_latency_ms{step:${i}}`, "avg"),
+    });
+  }
+
+  const dropped = m["dropped_iterations"];
+  const summary = {
+    base_url:           BASE_URL,
+    max_rps:            MAX_RPS,
+    steps:              STEPS,
+    step_s:             STEP_S,
+    committed_total:    m["committed_writes"] ? m["committed_writes"].values.count : 0,
+    rejected_total:     m["rejected_writes"]  ? m["rejected_writes"].values.count  : 0,
+    rej429_total:       m["rejected_429"]     ? m["rejected_429"].values.count     : 0,
+    rej503_total:       m["rejected_503"]     ? m["rejected_503"].values.count     : 0,
+    rej_other_total:    m["rejected_other"]   ? m["rejected_other"].values.count   : 0,
+    dropped_iterations: dropped ? dropped.values.count : 0,
+    curve,
+  };
+
+  console.log("K6_SUMMARY:" + JSON.stringify(summary));
+  return {};
+}

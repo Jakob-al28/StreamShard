@@ -1,0 +1,29 @@
+apiVersion: k6.io/v1alpha1
+kind: TestRun
+metadata:
+  name: k6-sweep
+  namespace: bench
+spec:
+  parallelism: WORKERS_PLACEHOLDER
+  paused: "false"
+  script:
+    configMap:
+      name: k6-scripts
+      file: write_sweep.js
+  runner:
+    env:
+      - name: BASE_URL
+        value: BASE_URL_PLACEHOLDER
+      - name: BASE_URL2
+        value: BASE_URL2_PLACEHOLDER
+      - name: MAX_RPS
+        value: "MAX_RPS_PLACEHOLDER"
+      - name: STEPS
+        value: "STEPS_PLACEHOLDER"
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"

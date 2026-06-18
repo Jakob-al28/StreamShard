@@ -1,0 +1,374 @@
+{
+  "workers": 12,
+  "max_rps": 60000,
+  "committed_total": 1396101,
+  "rejected_total": 6567567,
+  "rej429_total": 0,
+  "rej503_total": 6564693,
+  "rej_other_total": 2874,
+  "dropped_iterations": 3798766,
+  "peak_committed_rps": 17153.8,
+  "peak_offered_rps": 18000,
+  "curve": [
+    {
+      "offered_rps": 1500,
+      "committed_rps": 1210.7,
+      "rejected_rps": 287.4,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 287.4,
+      "mean_lat_ms": 5.02677495233518
+    },
+    {
+      "offered_rps": 3000,
+      "committed_rps": 2248.3,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 2.1289853335029347
+    },
+    {
+      "offered_rps": 4500,
+      "committed_rps": 3747.8,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 1.8853095210684903
+    },
+    {
+      "offered_rps": 6000,
+      "committed_rps": 5248.5,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 1.8951379025869295
+    },
+    {
+      "offered_rps": 7500,
+      "committed_rps": 6748.4,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 1.9720255971513623
+    },
+    {
+      "offered_rps": 9000,
+      "committed_rps": 8248.4,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 2.0441322327404032
+    },
+    {
+      "offered_rps": 10500,
+      "committed_rps": 9746.5,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 2.5602422099730444
+    },
+    {
+      "offered_rps": 12000,
+      "committed_rps": 11244.3,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 3.4941032332175155
+    },
+    {
+      "offered_rps": 13500,
+      "committed_rps": 12745.5,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 5.304528318665718
+    },
+    {
+      "offered_rps": 15000,
+      "committed_rps": 14230.9,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 8.894779971482313
+    },
+    {
+      "offered_rps": 16500,
+      "committed_rps": 15725.6,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 16.077651165667955
+    },
+    {
+      "offered_rps": 18000,
+      "committed_rps": 17153.8,
+      "rejected_rps": 0,
+      "rej429_rps": 0,
+      "rej503_rps": 0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 51.30034327086588
+    },
+    {
+      "offered_rps": 19500,
+      "committed_rps": 15792.4,
+      "rejected_rps": 298.0,
+      "rej429_rps": 0,
+      "rej503_rps": 298.0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 113.49873308482175
+    },
+    {
+      "offered_rps": 21000,
+      "committed_rps": 4671.2,
+      "rejected_rps": 2484.8,
+      "rej429_rps": 0,
+      "rej503_rps": 2484.8,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 1143.111403890653
+    },
+    {
+      "offered_rps": 22500,
+      "committed_rps": 1666.6999999999998,
+      "rejected_rps": 7027.3,
+      "rej429_rps": 0,
+      "rej503_rps": 7027.3,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 1969.1119215609524
+    },
+    {
+      "offered_rps": 24000,
+      "committed_rps": 1111.7,
+      "rejected_rps": 7028.2,
+      "rej429_rps": 0,
+      "rej503_rps": 7028.2,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 826.9909548670822
+    },
+    {
+      "offered_rps": 25500,
+      "committed_rps": 711.0,
+      "rejected_rps": 6873.4,
+      "rej429_rps": 0,
+      "rej503_rps": 6873.4,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 674.2881686234715
+    },
+    {
+      "offered_rps": 27000,
+      "committed_rps": 398.1,
+      "rejected_rps": 6071.6,
+      "rej429_rps": 0,
+      "rej503_rps": 6071.6,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 2679.6366649849356
+    },
+    {
+      "offered_rps": 28500,
+      "committed_rps": 28.9,
+      "rejected_rps": 6401.9,
+      "rej429_rps": 0,
+      "rej503_rps": 6401.9,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 4173.070171993676
+    },
+    {
+      "offered_rps": 30000,
+      "committed_rps": 5.2,
+      "rejected_rps": 5894.4,
+      "rej429_rps": 0,
+      "rej503_rps": 5894.4,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 4200.141782202448
+    },
+    {
+      "offered_rps": 31500,
+      "committed_rps": 0,
+      "rejected_rps": 18615.6,
+      "rej429_rps": 0,
+      "rej503_rps": 18615.6,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 0
+    },
+    {
+      "offered_rps": 33000,
+      "committed_rps": 0,
+      "rejected_rps": 31865.1,
+      "rej429_rps": 0,
+      "rej503_rps": 31865.1,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 0
+    },
+    {
+      "offered_rps": 34500,
+      "committed_rps": 0,
+      "rejected_rps": 31122.3,
+      "rej429_rps": 0,
+      "rej503_rps": 31122.3,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 0
+    },
+    {
+      "offered_rps": 36000,
+      "committed_rps": 0,
+      "rejected_rps": 31764.0,
+      "rej429_rps": 0,
+      "rej503_rps": 31764.0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 0
+    },
+    {
+      "offered_rps": 37500,
+      "committed_rps": 4.8,
+      "rejected_rps": 34854.2,
+      "rej429_rps": 0,
+      "rej503_rps": 34854.2,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 6857.094182465101
+    },
+    {
+      "offered_rps": 39000,
+      "committed_rps": 1386.7,
+      "rejected_rps": 33259.1,
+      "rej429_rps": 0,
+      "rej503_rps": 33259.1,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 778.543215362245
+    },
+    {
+      "offered_rps": 40500,
+      "committed_rps": 1149.2,
+      "rejected_rps": 30607.1,
+      "rej429_rps": 0,
+      "rej503_rps": 30607.1,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 3056.842586733701
+    },
+    {
+      "offered_rps": 42000,
+      "committed_rps": 113.5,
+      "rejected_rps": 22205.9,
+      "rej429_rps": 0,
+      "rej503_rps": 22205.9,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 4164.006456814471
+    },
+    {
+      "offered_rps": 43500,
+      "committed_rps": 0.2,
+      "rejected_rps": 24240.4,
+      "rej429_rps": 0,
+      "rej503_rps": 24240.4,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 3170.0531094999997
+    },
+    {
+      "offered_rps": 45000,
+      "committed_rps": 0,
+      "rejected_rps": 13125.2,
+      "rej429_rps": 0,
+      "rej503_rps": 13125.2,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 0
+    },
+    {
+      "offered_rps": 46500,
+      "committed_rps": 0.2,
+      "rejected_rps": 29986.2,
+      "rej429_rps": 0,
+      "rej503_rps": 29986.2,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 5167.58323
+    },
+    {
+      "offered_rps": 48000,
+      "committed_rps": 19.3,
+      "rejected_rps": 28192.6,
+      "rej429_rps": 0,
+      "rej503_rps": 28192.6,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 4800.660583127486
+    },
+    {
+      "offered_rps": 49500,
+      "committed_rps": 841.8,
+      "rejected_rps": 18382.9,
+      "rej429_rps": 0,
+      "rej503_rps": 18382.9,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 3515.6217752034913
+    },
+    {
+      "offered_rps": 51000,
+      "committed_rps": 324.6,
+      "rejected_rps": 21362.7,
+      "rej429_rps": 0,
+      "rej503_rps": 21362.7,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 3173.9525569187867
+    },
+    {
+      "offered_rps": 52500,
+      "committed_rps": 0.5,
+      "rejected_rps": 38014.8,
+      "rej429_rps": 0,
+      "rej503_rps": 38014.8,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 5977.225087375
+    },
+    {
+      "offered_rps": 54000,
+      "committed_rps": 0.5,
+      "rejected_rps": 41395.4,
+      "rej429_rps": 0,
+      "rej503_rps": 41395.4,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 5248.937658375
+    },
+    {
+      "offered_rps": 55500,
+      "committed_rps": 0.1,
+      "rejected_rps": 41794.4,
+      "rej429_rps": 0,
+      "rej503_rps": 41794.4,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 3390.356675
+    },
+    {
+      "offered_rps": 57000,
+      "committed_rps": 0,
+      "rejected_rps": 41783.0,
+      "rej429_rps": 0,
+      "rej503_rps": 41783.0,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 0
+    },
+    {
+      "offered_rps": 58500,
+      "committed_rps": 785.6,
+      "rejected_rps": 42638.9,
+      "rej429_rps": 0,
+      "rej503_rps": 42638.9,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 2112.04200373919
+    },
+    {
+      "offered_rps": 60000,
+      "committed_rps": 2299.2,
+      "rejected_rps": 39179.9,
+      "rej429_rps": 0,
+      "rej503_rps": 39179.9,
+      "rej_other_rps": 0,
+      "mean_lat_ms": 2966.9128579702992
+    }
+  ]
+}

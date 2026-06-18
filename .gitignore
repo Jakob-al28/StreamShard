@@ -1,0 +1,19 @@
+# binaries
+dist/
+*.exe
+
+# terraform state
+deploy/terraform/.terraform/
+deploy/terraform/*.tfstate
+deploy/terraform/*.tfstate.backup
+deploy/terraform/.terraform.lock.hcl
+
+# Go
+vendor/
+
+# misc
+.env
+*.log
+
+# python venv
+bench/analysis/venv/
