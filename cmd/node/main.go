@@ -126,6 +126,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("swim: %v", err)
 		}
+		if nodeRing != nil {
+			go watchNodeRing(swimMem)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -144,6 +147,20 @@ func main() {
 		*addr, *queueCap, fencer.Seen())
 	if err := http.ListenAndServe(*addr, mux); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func watchNodeRing(mem *membership.Member) {
+	for ev := range mem.Events() {
+		if ev.HTTPAddr == "" {
+			continue
+		}
+		switch ev.Type {
+		case membership.EventJoin:
+			nodeRing.Add(ev.HTTPAddr)
+		case membership.EventDead:
+			nodeRing.Remove(ev.HTTPAddr)
+		}
 	}
 }
 
@@ -447,7 +464,8 @@ func handleReshardLoad(w http.ResponseWriter, r *http.Request) {
 		for _, bw := range buffered {
 			cur.Apply(bw.ID, bw.Key, bw.Value)
 		}
-		log.Printf("reshard load complete: replayed %d buffered writes", len(buffered))
+		caught := catchUpFromSource(req.Source, cur)
+		log.Printf("reshard load complete: replayed %d buffered writes, caught up %d more", len(buffered), caught)
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -506,4 +524,45 @@ func loadFromSource(sourceAddr string, newEpoch uint64) error {
 
 	log.Printf("reshard load complete: snapshot_base=%d tail=%d entries, epoch=%d", baseOffset, len(entries), fencer.Seen())
 	return nil
+}
+
+// catchUpFromSource pulls anything the source has past our current head when resharding for correct replication
+func catchUpFromSource(sourceAddr string, cur *partition.Partition) int {
+	applied := 0
+	deadline := time.Now().Add(4 * suspectTimeoutHint())
+	for time.Now().Before(deadline) {
+		from := cur.Head()
+		resp, err := http.Get(fmt.Sprintf("http://%s/log?from=%d", sourceAddr, from))
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		var entries []ilog.Entry
+		if err := json.Unmarshal(body, &entries); err != nil {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		for _, e := range entries {
+			cur.Apply(e.ID, e.Key, e.Value)
+		}
+		applied += len(entries)
+		time.Sleep(200 * time.Millisecond)
+	}
+	return applied
+}
+
+// Best-effort estimate of how long SWIM convergence can take
+func suspectTimeoutHint() time.Duration {
+	if v := os.Getenv("SWIM_SUSPECT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return 10 * time.Second
 }

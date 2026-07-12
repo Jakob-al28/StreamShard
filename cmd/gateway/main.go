@@ -22,18 +22,21 @@ import (
 )
 
 type gateway struct {
-	ring        *ring.Ring
-	rf          int
-	w           int
-	client      *http.Client
-	limiter     *ratelimit.Map
-	noLimit     bool
-	primaryRepl bool
-	breakers    map[string]*breaker.Breaker
-	bmu         sync.RWMutex
-	epoch       atomic.Uint64
-	overloaded  sync.Map
-	sem         chan struct{}
+	ring         *ring.Ring
+	rf           int
+	w            int
+	client       *http.Client
+	limiter      *ratelimit.Map
+	noLimit      bool
+	primaryRepl  bool
+	breakers     map[string]*breaker.Breaker
+	bmu          sync.RWMutex
+	epoch        atomic.Uint64
+	overloaded   sync.Map
+	sem          chan struct{}
+	swimMem      *membership.Member
+	cpAddr       string
+	failedOverAt sync.Map // addr (string) -> time.Time of last epoch-bump failover for it
 }
 
 func (gw *gateway) isOverloaded(addr string) bool {
@@ -125,6 +128,7 @@ func main() {
 		primaryRepl: *primaryReplication,
 		breakers:    breakers,
 		sem:         make(chan struct{}, *maxInflight),
+		cpAddr:      *controlplane,
 	}
 
 	go gw.pollHealth(*healthInterval)
@@ -140,17 +144,16 @@ func main() {
 		go gw.pollEpoch(*controlplane, *healthInterval)
 	}
 
-	var swimMem *membership.Member
 	if *swimAddr != "" {
 		seeds := nodes
 		if *swimSeeds != "" {
 			seeds = strings.Split(*swimSeeds, ",")
 		}
-		var err error
-		swimMem, err = membership.New(*swimAddr, "", seeds)
+		swimMem, err := membership.New(*swimAddr, "", seeds)
 		if err != nil {
 			log.Fatalf("swim: %v", err)
 		}
+		gw.swimMem = swimMem
 		go gw.watchMembership(swimMem, *controlplane, *breakerThresh, *breakerCooldown)
 	}
 
@@ -161,11 +164,23 @@ func main() {
 	mux.HandleFunc("GET /health", gw.handleHealth)
 	mux.HandleFunc("GET /swim", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if swimMem == nil {
+		if gw.swimMem == nil {
 			json.NewEncoder(w).Encode(map[string]any{"members": nil})
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"members": swimMem.Members()})
+		live := gw.swimMem.LiveHTTPAddrs()
+		states := make(map[string]string, len(live))
+		for addr := range live {
+			if gw.swimMem.IsSuspect(addr) {
+				states[addr] = "suspect"
+			} else {
+				states[addr] = "alive"
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"members": gw.swimMem.Members(),
+			"states":  states,
+		})
 	})
 
 	log.Printf("gateway listening on %s  rf=%d w=%d  rate=%.0f burst=%d  epoch=%d  nodes: %v",
@@ -228,6 +243,31 @@ func fetchEpoch(cpAddr string) (uint64, error) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return 0, err
+	}
+	return out.Epoch, nil
+}
+
+func (gw *gateway) bumpEpoch(ctx context.Context) (uint64, error) {
+	if gw.cpAddr == "" {
+		return 0, fmt.Errorf("no controlplane configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://%s/epoch/bump", gw.cpAddr), nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := gw.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Epoch uint64 `json:"epoch"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, err
+	}
+	if out.Epoch > gw.epoch.Load() {
+		gw.epoch.Store(out.Epoch)
 	}
 	return out.Epoch, nil
 }
@@ -327,9 +367,11 @@ func (gw *gateway) handleEvent(w http.ResponseWriter, r *http.Request) {
 		err    error
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
-	defer cancel()
+	const attemptTimeout = 1200 * time.Millisecond
+
 	send := func() (primaryResult result, acks int) {
+		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+		defer cancel()
 		if len(replicas) == 1 || gw.primaryRepl {
 			status, rb, err := gw.post(ctx, replicas[0], "/events", body)
 			primaryResult = result{status: status, body: rb, err: err}
@@ -345,7 +387,7 @@ func (gw *gateway) handleEvent(w http.ResponseWriter, r *http.Request) {
 		}()
 		for _, replica := range replicas[1:] {
 			go func(addr string) {
-				rctx, rcancel := context.WithTimeout(context.Background(), 4*time.Second)
+				rctx, rcancel := context.WithTimeout(context.Background(), attemptTimeout)
 				defer rcancel()
 				status, _, err := gw.post(rctx, addr, "/replicate", body)
 				ch <- result{status: status, err: err}
@@ -375,6 +417,37 @@ func (gw *gateway) handleEvent(w http.ResponseWriter, r *http.Request) {
 	primaryResult, acks := send()
 	// only retry on epoch conflict or total failure
 	if acks < need && primaryResult.status != http.StatusTooManyRequests && (primaryResult.status == http.StatusConflict || primaryResult.status == 0) {
+		// Bump epoch once SWIM confirms the primary dead, to reduce loss. Deliberately
+		// not on Suspect: suspicion can be a false positive (e.g. a slow, not dead,
+		// node), and rerouting on rumor would abandon a node about to refute it.
+		failedOver := false
+		if gw.primaryRepl && len(replicas) > 0 && gw.swimMem != nil && gw.swimMem.IsSuspect(replicas[0]) {
+			deadAddr := replicas[0]
+			bumped := false
+			if v, ok := gw.failedOverAt.Load(deadAddr); ok && time.Since(v.(time.Time)) < attemptTimeout {
+				bumped = true
+			} else {
+				bumpCtx, bumpCancel := context.WithTimeout(context.Background(), attemptTimeout)
+				_, err := gw.bumpEpoch(bumpCtx)
+				bumpCancel()
+				if err == nil {
+					gw.failedOverAt.Store(deadAddr, time.Now())
+					bumped = true
+				}
+			}
+			if bumped {
+				for _, addr := range gw.ring.Replicas(req.Key, gw.rf) {
+					if addr != deadAddr {
+						replicas = []string{addr}
+						failedOver = true
+						break
+					}
+				}
+			}
+		}
+		if !failedOver {
+			replicas = gw.ring.Replicas(req.Key, gw.rf)
+		}
 		primaryResult, acks = send()
 	}
 

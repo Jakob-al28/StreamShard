@@ -1,7 +1,9 @@
 package log
 
 import (
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestAppendAndOffset(t *testing.T) {
@@ -57,5 +59,59 @@ func TestSincePastHead(t *testing.T) {
 
 	if l.Since(99) != nil {
 		t.Fatal("expected nil for offset past head")
+	}
+}
+
+func TestCompactLeavesDedupIntact(t *testing.T) {
+	l, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		l.Append(string(rune('a'+i)), "k", []byte("v"))
+	}
+
+	if err := l.Compact(Snapshot{BaseOffset: 3}); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+
+	if _, ok := l.Append("a", "k", []byte("v")); ok {
+		t.Fatal("replay of compacted-but-still-fresh id should be deduped")
+	}
+}
+
+func TestDedupSeenWithinTTL(t *testing.T) {
+	d := newDedupSet(5 * time.Minute)
+	now := time.Unix(1000, 0)
+
+	d.add("x", now)
+	if !d.seen("x", now.Add(time.Minute)) {
+		t.Fatal("id within TTL should be seen")
+	}
+}
+
+func TestDedupExpiresAfterTTL(t *testing.T) {
+	d := newDedupSet(5 * time.Minute)
+	now := time.Unix(1000, 0)
+
+	d.add("x", now)
+	if d.seen("x", now.Add(6*time.Minute)) {
+		t.Fatal("id past TTL should have expired")
+	}
+}
+
+func TestDedupBoundedSize(t *testing.T) {
+	ttl := 10 * time.Second
+	d := newDedupSet(ttl)
+	start := time.Unix(0, 0)
+
+	for s := 0; s < 100; s++ {
+		now := start.Add(time.Duration(s) * time.Second)
+		d.add("id-"+strconv.Itoa(s), now)
+		d.evict(now)
+	}
+
+	if d.len() > 12 {
+		t.Fatalf("dedup set grew past one TTL window: %d ids retained", d.len())
 	}
 }

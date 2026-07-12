@@ -34,6 +34,10 @@ type baseCmd struct {
 	reply chan uint64
 }
 
+type headCmd struct {
+	reply chan uint64
+}
+
 type compactCmd struct{}
 
 type QueryResult struct {
@@ -46,6 +50,7 @@ type Partition struct {
 	query    chan queryCmd
 	logs     chan logCmd
 	base     chan baseCmd
+	head     chan headCmd
 	compact  chan compactCmd
 	applyCap int
 }
@@ -65,6 +70,7 @@ func Open(dataDir string, window time.Duration, topK int, queueCap int, noIdempo
 		query:    make(chan queryCmd, 64),
 		logs:     make(chan logCmd, 64),
 		base:     make(chan baseCmd, 64),
+		head:     make(chan headCmd, 64),
 		compact:  make(chan compactCmd, 1),
 		applyCap: queueCap,
 	}
@@ -126,6 +132,9 @@ func (p *Partition) run(dataDir string, window time.Duration, topK int, noIdempo
 
 		case cmd := <-p.base:
 			cmd.reply <- l.BaseOffset()
+
+		case cmd := <-p.head:
+			cmd.reply <- l.Head()
 
 		case <-p.compact:
 			if uint64(len(l.Entries())) >= compactThreshold {
@@ -196,5 +205,11 @@ func (p *Partition) LogSince(offset uint64) []log.Entry {
 func (p *Partition) BaseOffset() uint64 {
 	reply := make(chan uint64, 1)
 	p.base <- baseCmd{reply: reply}
+	return <-reply
+}
+
+func (p *Partition) Head() uint64 {
+	reply := make(chan uint64, 1)
+	p.head <- headCmd{reply: reply}
 	return <-reply
 }

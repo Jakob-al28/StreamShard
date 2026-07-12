@@ -1,8 +1,12 @@
 # StreamShard
 
-A distributed event ingestion and aggregation engine, consistent-hash sharding, quorum replication, SWIM membership, and a full scalability study on GCP. Built for the Scalability Engineering course (SS26, TU Berlin)
+A distributed event ingestion and aggregation engine: consistent-hash sharding, quorum-based write replication, SWIM membership, overload protection via token buckets, circuit breakers and load shedding, and a full scalability study on GCP. Built for the Scalability Engineering course (SS26, TU Berlin)
 
 **Team:** Jakob (Jakob-al28) and Javier (Xaverherdel)
+
+**Presentation:** <br>
+[docs/Prototyping_distributed_systems_Jakob_Javier.pdf](docs/Prototyping_distributed_systems_Jakob_Javier.pdf) 
+[docs/Prototyping_distributed_systems_Jakob_Javier.pptx](docs/Prototyping_distributed_systems_Jakob_Javier.pptx)
 
 ---
 
@@ -12,25 +16,40 @@ A distributed event ingestion and aggregation engine, consistent-hash sharding, 
 
 ### Summary
 
-Metric: committed write throughput under a 4 s SLA. Durable writes benchmarked, with bottlenecks identified via per-tier CPU profiling. Full details in [Scaling behaviour](#scaling-behaviour) and [Findings](#findings-and-next-steps).
+Metric: committed write throughput under a 4 s SLA. A write still in flight after 4 s is
+counted as failed by the load generator regardless of whether the server eventually
+replies, which is why every curve rises to a peak and then collapses instead of
+plateauing: past the ceiling, latency climbs into the seconds and more writes miss the
+SLA. Durable writes benchmarked, with bottlenecks identified via per-tier CPU profiling.
+Full details in [Scaling behaviour](#scaling-behaviour) and [Findings](#findings-and-next-steps).
 
-- **Bottleneck shifts by config.** RF=1 is gateway-bound and
-  scales near-linearly (9.3k -> 29k -> 44k committed/s, 1/3/5 nodes, e2-standard-2). RF=3
-  is bound by wherever the replication fan-out runs.
-- **Gateway fan-out is ~2x faster** (5-node: 18.9k vs 8.6k). Primary-replication concentrates each key's fan-out on
-  one primary, which CPU-saturates (93% / 3% idle); gateway fan-out spreads it.
+- **Bottleneck shifts by config.** The node's serial WAL apply loop (~10k/node) is always
+  the underlying bottleneck, and RF=1 scales near-linearly against that ceiling
+  (9.3k -> 29k -> 44k committed/s, 1/3/5 nodes, e2-standard-2). Primary-replication adds
+  replication fan-out onto that same node. CPU is not yet saturated at the point
+  throughput peaks (busiest node ~46-57% of its ceiling); it keeps climbing well past
+  that as offered load increases further, but throughput does not follow, which points
+  to synchronous quorum-wait rather than raw CPU exhaustion as the limit at peak.
+  Gateway fan-out moves the fan-out cost off the node, back to just the serial WAL
+  bottleneck.
+- **Gateway fan-out is ~2x faster than primary fan-out** (5-node: 18.9k vs 8.6k). Primary-replication concentrates each key's fan-out on
+  one primary; the busiest node's CPU at peak throughput is actually lower under
+  gateway fan-out (26-53% of ceiling) than under primary-replication (46-57%), and the
+  fan-out cost instead shows up on the gateway side (35-90% of ceiling, spread across N
+  gateways rather than stacked onto one primary).
 - **Core count helps parallel work, core speed helps serial work.** Doubling vCPU at the
   same clock (e2-standard-2 -> e2-standard-4) nearly doubled 5-node primary-replication
   (8.6k -> 17.2k) but barely moved the serial 1-node case
   (9.3k -> 9.6k). A higher-clock machine with the same 4 cores (c2-standard-4, 3.8 GHz)
   did the opposite: +20% on 1-node (9.6k -> 11.2k). CPU sampling backs both: the primary
-  saturates under replication, the 1-node gateway path is serial.
-- **Write batching regressed throughput** (9.6k -> 6.7k as batch grows): the ack path is serial, so the fix is several apply goroutines or a faster core.
+  saturates under replication work.
+- **Write batching regressed throughput** (9.6k -> 6.7k as batch grows): the apply path is serial, so the fix is sharding across several apply workers or a faster core.
 
 ### Contents
 
 - [Summary](#summary)
 - [Architecture](#architecture)
+- [Resharding](#resharding)
 - [Requirements](#requirements)
 - [Build & test](#build--test)
 - [Running locally](#running-locally)
@@ -38,7 +57,6 @@ Metric: committed write throughput under a 4 s SLA. Durable writes benchmarked, 
 - [Benchmarking](#benchmarking)
 - [Scaling behaviour](#scaling-behaviour)
 - [Findings and next steps](#findings-and-next-steps)
-- [Resharding](#resharding)
 - [API reference](#api-reference)
 - [Limitations](#limitations)
 
@@ -48,16 +66,145 @@ Metric: committed write throughput under a 4 s SLA. Durable writes benchmarked, 
 
 **Partition nodes** own an append-only log and aggregates for their key-space. Log entries are never overwritten. Node state persists across restarts via the on-disk WAL, snapshot, and epoch file.
 
+## Resharding
+
+Every write carries the current **epoch**, a per-partition counter the control plane owns. A node checks the epoch on each write and rejects one that is behind ([`checkEpoch`](cmd/node/main.go)); this is what stops a stale node from accepting writes after it has been superseded, e.g. an old primary that missed a failover still thinks it owns the key range. Bumping the epoch is what fences it out, so two nodes can never both believe they are current for the same partition at once.
+
+```bash
+# Live reshard (default): source never freezes, target buffers writes during transfer, favours availability
+curl -X POST http://CP_IP:6060/reshard \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"NODE0_IP:8080","target":"NODE2_IP:8080","partition":"_default"}'
+
+# Synchronous reshard: brief 503 window, no buffering on target
+curl -X POST http://CP_IP:6060/reshard \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"NODE0_IP:8080","target":"NODE2_IP:8080","partition":"_default","live":false}'
+```
+
+**Live path (default):** target enters `Loading` state and buffers incoming writes while pulling the snapshot and WAL tail from the source. Once the transfer finishes the buffer replays into the partition. Source is never frozen, so write availability is uninterrupted.
+
+**Synchronous reshard (`live: false`):** control plane freezes the source (writers see 503), bumps the epoch, triggers the transfer, then thaws.
+
+---
+
 ## Requirements
 
 | Requirement | Approach | Implementation |
 |-----|----------|---------------|
 | 1 | Stateless gateways + stateful nodes | `cmd/gateway`, `cmd/node` |
-| 2 | Consistent-hash partitioning, quorum replication, 1/3/5 configs | `internal/ring`, `internal/partition`, Terraform |
-| 3 | Queue-depth watermark, 429 before channel fills | `cmd/node` `checkShedding()` |
-| 4a | Custom token bucket (atomic refill) | `internal/ratelimit` |
+| 2 | Consistent-hash partitioning, quorum-based write replication, 1/3/5 configs | `internal/ring`, `internal/partition`, Terraform |
+| 3 | Load Shedding on the data nodes, 429 before queue fills | `cmd/node` `checkShedding()` |
+| 4a | Custom token bucket | `internal/ratelimit` |
 | 4b | Custom circuit breaker (closed/open/half-open) | `internal/breaker` |
-| Bonus | SWIM gossip failure detection, dynamic ring updates, primary failover; alternative primary-driven replication path; larger-instance benchmark (e2-standard-4, vertical scaling) | `internal/membership`, `cmd/node`, `deploy/terraform`, `bench/` |
+| Bonus | larger-instance benchmark (e2-standard-4, vertical scaling); SWIM gossip failure detection, dynamic ring updates, primary failover; alternative primary-driven replication path | `internal/membership`, `cmd/node`, `deploy/terraform`, `bench/` |
+
+### Requirement 1 — Stateless / stateful split
+
+Gateways hold no partition data. All durable state (WAL, snapshot, epoch file) lives on partition nodes. Gateways can be added or removed without data loss.
+
+The partition node's apply loop is the owner of mutable state for a key range:
+
+```go
+// internal/partition/partition.go
+func (p *Partition) run(...) {
+    l, _ := log.Open(dataDir)   // WAL + in-memory log
+    agg := aggregate.New(...)   // rolling aggregates
+    for {
+        select {
+        case cmd := <-p.apply:
+            e, fresh := l.Append(cmd.id, cmd.key, cmd.value)
+            if fresh { agg.Apply(e) }
+            cmd.reply <- ApplyResult{Entry: e, Fresh: fresh}
+        // ...
+        }
+    }
+}
+```
+
+The gateway routes via a consistent-hash ring lookup:
+
+```go
+// cmd/gateway/main.go
+replicas := gw.ring.Replicas(req.Key, gw.rf)
+```
+
+### Requirement 3 — Overload mitigation
+
+Nodes reject incoming writes with HTTP 429 before the apply queue fills:
+
+```go
+// cmd/node/main.go
+func checkShedding(w http.ResponseWriter) bool {
+    cur := getPartition()
+    depth := cur.QueueDepth()
+    if depth >= cur.QueueCap() {
+        w.Header().Set("Retry-After", "1")
+        w.WriteHeader(http.StatusTooManyRequests)
+        json.NewEncoder(w).Encode(map[string]any{
+            "error": "overloaded", "depth": depth, "cap": cur.QueueCap(),
+        })
+        return true
+    }
+    return false
+}
+```
+
+### Requirement 4a — Token bucket rate limiter
+
+Custom per-key token bucket in `internal/ratelimit`. Tokens refill at a fixed rate up to burst capacity; requests exceeding the rate are dropped at the gateway before reaching nodes:
+
+```go
+// internal/ratelimit/ratelimit.go
+func (b *Bucket) Allow() bool {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    now := time.Now()
+    b.tokens = min(b.burst, b.tokens+now.Sub(b.lastTime).Seconds()*b.rate)
+    b.lastTime = now
+    if b.tokens < 1 {
+        return false
+    }
+    b.tokens--
+    return true
+}
+```
+
+### Requirement 4b — Circuit breaker
+
+Custom closed/open/half-open state machine in `internal/breaker`. Opens after N consecutive failures to a node; probes with one request after the cooldown before fully re-closing:
+
+```go
+// internal/breaker/breaker.go
+func (b *Breaker) Allow() bool {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    switch b.state {
+    case closed:
+        return true
+    case open:
+        if time.Since(b.openedAt) >= b.cooldown {
+            b.state = halfOpen
+            return true
+        }
+        return false
+    case halfOpen:
+        return false
+    }
+    return false
+}
+
+func (b *Breaker) Failure() {
+    b.mu.Lock()
+    defer b.mu.Unlock()
+    b.failures++
+    if b.state == halfOpen || b.failures >= b.threshold {
+        b.state = open
+        b.openedAt = time.Now()
+        b.failures = 0
+    }
+}
+```
 
 ---
 
@@ -114,6 +261,56 @@ go run ./cmd/gateway --addr :7070 \
   --swim-seeds 127.0.0.1:9081,127.0.0.1:9082,127.0.0.1:9083
 ```
 
+### Demo: failover and live reshard
+
+`demo/demo.sh` starts a local 3-node RF=3 W=2 cluster (SWIM on) and kills the primary
+under load. The circuit breaker opens first (in under a second) so the gateway stops
+hammering the dead node; SWIM then converges and drops it from the ring, and writes
+recover in roughly 1.5-2s.
+
+Both SWIM and the circuit breaker are demo-tuned to make that layering visible inside a
+short live demo, not left at their production defaults: SWIM's ping interval, ping
+timeout, and suspicion timeout are set to 500ms / 200ms / 1500ms (production defaults
+are 2s / 1s / 10s, [internal/membership/membership.go](internal/membership/membership.go)), and the breaker's
+threshold/cooldown are set to 3 failures / 30s (default: 5 / 10s). Real SWIM detection
+would take several seconds to converge. The benchmarks in [Scaling behaviour](#scaling-behaviour)
+ran with SWIM off and a static peer list, so none of this tuning affects any
+measured throughput number.
+
+```bash
+./demo/demo.sh up       # build + start control plane, gateway, 3 nodes
+./demo/demo.sh load     # steady writes on one key (own terminal)
+./demo/demo.sh watch    # per-node alive/epoch/WAL table (own terminal)
+./demo/demo.sh kill     # kill the primary; the load pane recovers
+./demo/demo.sh reshard  # start a 4th node and live-migrate the partition onto it
+./demo/demo.sh down     # stop everything, wipe state
+```
+
+![failover demo](docs/demo.gif)
+
+### Demo: overload protection
+
+`demo/resilience.sh` runs all three overload/failure mechanisms
+against a local cluster in one pass and prints what each one rejected:
+
+```bash
+$ ./demo/resilience.sh
+building...
+
+=== 1. token bucket (gateway): 30 fast writes to one key, bucket rate=5/s burst=3 ===
+rate limited: 26/30 rejected with 429
+
+=== 2. load shedding (node): 200 parallel writes at node0, queue-cap=1 ===
+9/200 writes rejected with 429 because the queue was full.
+
+=== 3. circuit breaker (gateway): kill node2, write until the breaker opens ===
+Circuit Breaker detected the dead node and tripped to OPEN.
+Gateway /health endpoint reports:
+{"addr":"127.0.0.1:8093","depth":null,"overloaded":null,"breaker":"open","err":"Get \"http://127.0.0.1:8093/health\": dial tcp 127.0.0.1:8093: connect: connection refused"}
+
+tearing down.
+```
+
 ---
 
 ## Deploying on GCP
@@ -143,12 +340,13 @@ terraform apply -var="node_count=3" -var="gateway_count=3"
 terraform apply -var="node_count=5" -var="gateway_count=5"
 ```
 
-This brings up the SUT (nodes, gateways, control plane, and an external load balancer).
+Scaling out/in is a `terraform apply` with a different `node_count`; when shrinking, first move the leaving node's partition to a survivor via [Resharding](#resharding). Scaling up/down swaps `machine_type` and re-applies.
+
+This brings up the SUT (nodes, gateways, control plane, and an external load balancer). The load balancer is a GCP TCP forwarding rule with a manually configured target pool and HTTP health check (`/health`); no managed load-balancing service is used.
 The load-generation **GKE cluster is separate** and created once, see
 [Benchmarking](#benchmarking) for the `gcloud container clusters create` command.
 
-(SWIM gossip membership is implemented but default is off: `enable_swim=true` to turn it
-on.)
+SWIM gossip membership is implemented but off by default (including in the benchmarks): `enable_swim=true` to turn it on.
 
 ### Bonus: larger instance type (vertical scaling)
 
@@ -167,11 +365,11 @@ terraform apply -var="node_count=3" -var="gateway_count=3" -var="rf=3" \
   -var="primary_replication=true"
 ```
 
-Under measurement this path is actually **~2x slower** than gateway fan-out,
+Under measurement this path is **~2x slower** than gateway fan-out,
 because each key's fan-out is concentrated on that key's single primary node, which
-saturates its CPU (gateway fan-out spreads the same work across all gateways). It does,
-however, scale ~linearly with vCPU, so it is the path
-used for the vertical-scaling comparison. See *Scaling behaviour*.
+saturates its CPU. It does, however, scale close to linearly with vCPU (~1.8-2.0x
+throughput for 2x cores), since the fan-out itself is parallel work. See *Scaling
+behaviour*.
 
 ### Benchmark flags
 
@@ -234,6 +432,7 @@ gcloud container clusters create streamshard-bench \
 | `--rps` (cap) | per config | Each config saturates at a different load, so an appropriate cap was chosen per config. |
 | `--label-suffix` | none / `_pr` | No suffix = gateway fan-out (the default path); `_pr` = primary-replication runs (`primary_replication=true`). |
 | `disable_ratelimit` (terraform) | `true` | Clean throughput, no per-key limiting. |
+| `queue_cap` (terraform) | `8192` (default, unchanged) | Apply-queue capacity before 429 shedding; large enough that shedding rarely fires during the sweeps, so most rejections are 503 (quorum not reached under load), not 429. |
 
 Example: the RF=1 sweep (gateway fan-out, 12 workers, per-config caps):
 
@@ -298,13 +497,12 @@ sweep directly:
 k6 run -e BASE_URL=http://localhost:7070 -e MAX_RPS=5000 bench/k6/write_sweep.js
 ```
 
-### Where the bottleneck is
+### Additional data collected: CPU traces
 
 `bench/poll_cpu.sh` samples per-process CPU on every node and gateway during a run.
 `run_benchmark.sh` starts it automatically and writes one CSV per result
-(`{N}node_..._cpu.csv`), so each throughput curve has a matching CPU trace.
-Under gateway fan-out, the gateway is the busy tier; under primary-replication the data node is
-(~93% CPU / 3% idle at the peak). See *Scaling behaviour* below.
+(`{N}node_..._cpu.csv`), so each throughput curve has a matching CPU trace. These traces
+are what the CPU percentages in *Scaling behaviour* and *Findings* below are drawn from.
 
 To run it standalone against an already-deployed cluster:
 
@@ -335,13 +533,13 @@ RF=3 configs with primary replication enabled on e2-standard-4:
 
 (1 node forces RF=1, so the 1-node column is identical across
 RF=3 modes. The e2-standard-2 primary-replication 3/5-node
-runs used 4 k6 workers, not 12; that is fine because the data-node CPU was saturated at
-the peak in both, ~3% idle, so 4 workers was enough to reach the real ceiling, see
-below.)
+runs used 4 k6 workers, not 12; that is fine because the data-node CPU was already the
+limiting resource, so 4 workers was enough to reach the real ceiling, see below.)
 
 **RF=1 scales near-linearly with real writes** (9.3k -> 29k -> 44k). No replication, so a
 write is one local append; throughput grows with the number of independent
-gateway+node pipelines.
+gateway+nodes. 3-node measures ~105% of ideal-linear, within measurement noise: not
+evidence of superlinear speedup.
 
 ![RF=1 peak vs nodes](docs/scaling_rf1.png)
 ![RF=1 offered vs committed](docs/scaling_rf1_sweep.png)
@@ -349,10 +547,12 @@ gateway+node pipelines.
 **Gateway fan-out beats primary-replication for throughput (~2×).** With gateway fan-out the replication work is
 spread across all N gateways, so it scales (3-node 11.5k -> 5-node 18.9k). With
 primary-replication the fan-out for a key is concentrated on that key's single primary
-node, which saturates its CPU, so 3-node PR (5.6k) drops *below* the 1-node
+node, which pushes its CPU up, so 3-node PR (5.6k) drops *below* the 1-node
 baseline (9.3k), and 5-node only recovers to 8.6k. CPU sampling confirms it: at the
-primary-replication peak the data node runs at ~93% CPU / 3% idle, while
-under gateway fan-out the gateway is the busier tier.
+the busiest node reaches 46-57% of the 2-vCPU ceiling under primary-replication
+and 26-53% under gateway fan-out at the moment throughput peaks; CPU keeps climbing
+well past that point as offered load increases further, without a matching rise in
+committed throughput.
 
 ![RF=3: gateway fan-out vs primary-replication](docs/scaling_rf3_gwfanout.png)
 ![RF=3 gateway fan-out, offered vs committed](docs/scaling_rf3_gwfanout_sweep.png)
@@ -368,7 +568,7 @@ primary-replication configuration on the two machine sizes:
 
 Doubling the vCPU roughly doubled the replicated configs: 3-node went 5.6k -> 10.2k and
 5-node went 8.6k -> 17.2k (both about 1.8-2.0x for 2x the cores). Throughput increasing with the core count shows that the limit was CPU, specifically the primary node doing
-the replication fan-out. That fan-out is parallel work (a goroutine per replica), which is why vertical scaling helped here.
+the replication fan-out. That fan-out is parallel work (a worker per replica), which is why vertical scaling helped here.
 
 The 1-node number is the exception: it barely moves (9.3k -> 9.6k). With one node there
 is no replication, so the node is not the busy part, the CPU samples show it mostly idle
@@ -384,11 +584,11 @@ e2-standard-4 (2× vCPU):
 ![RF=3 primary-replication on e2-standard-4](docs/scaling_rf3_pr_e2big.png)
 ![RF=3 primary-replication on e2-standard-4, offered vs committed](docs/scaling_rf3_pr_e2big_sweep.png)
 
-### More cores vs a faster core
+### CPU Speed vs. Core Count
 
-To confirm the 1-node limit is serial (clock-bound, not core-count-bound), we ran the
-same 1-node config on three machines: same number of cores but a faster clock is the
-variable that matters.
+To confirm the 1-node limit is serial, we ran the
+same 1-node config on three machines. Doubling core count at the same clock speed had
+almost no effect; a faster CPU clock was the variable that mattered.
 
 | 1-node, RF=3 | cores / clock | peak committed/s |
 |--------------|---------------|-----------------:|
@@ -396,8 +596,9 @@ variable that matters.
 | e2-standard-4 | 4 vCPU, ~2.5 GHz       | 9,620 |
 | c2-standard-4 | 4 vCPU, **3.8 GHz**    | **11,180** |
 
-Doubling the cores at the same clock did almost nothing, but the higher-clock c2
-machine increased throughput by about 20% with the same 4 cores.
+The c2-standard-4 has the same core count as the e2-standard-4 but a 52% higher clock
+speed, and delivers ~20% higher throughput, consistent with the apply loop being
+single-threaded and clock-bound.
 
 ![1-node: more cores vs a faster core](docs/clock_compare.png)
 
@@ -405,15 +606,14 @@ machine increased throughput by about 20% with the same 4 cores.
 
 ## Findings and next steps
 
-The single-node ceiling (~9.3k) is serial work: each node applies writes through one
-goroutine, and the gateway acks only after that goroutine replies. Serial work does not
-benefit from more cores (e2 -> e2big flat) but does from a faster core (c2 +20%). The
-replicated configs scale with cores because their extra work, the fan-out, is parallel.
+Scaling out sidesteps the single-node ceiling because more nodes means more independent
+single-threaded apply loops with no cross-node communication or replication sync between
+them. The same win is available inside one node: add more partitions, sharding keys
+across several apply workers instead of one, each with its own WAL.
 
-**WAL batching: a measured negative result.** We added an opt-in `--wal-batch N` (drain
-N queued writes, one `write()` syscall for the batch; tested for correctness in
-`TestBatchedAndUnbatchedAgree` / `TestBatchedDurableWAL`). It made 1-node throughput
-*worse*, monotonically with batch size:
+WAL batching: a measured negative result: We added an opt-in `--wal-batch N` (drain
+N queued writes, one `write()` syscall for the batch. It made 1-node throughput
+worse, monotonically with batch size:
 
 | `--wal-batch` | peak committed/s |
 |--------------:|-----------------:|
@@ -424,31 +624,11 @@ N queued writes, one `write()` syscall for the batch; tested for correctness in
 ![WAL batching regression](docs/batch_compare.png)
 
 Acks are synchronous per request, but a batch can't reply to anyone until it fully
-flushes. The apply goroutine holds the lock through the whole batch, so all N requests
+flushes. The apply worker holds the lock through the whole batch, so all N requests
 wait on the slowest one and latency climbs. CPU traces confirm it is not resource
 exhaustion: the node is ~45% idle at collapse, stalled on the lock. The limit is the
-serial apply goroutine, so the ways up are sharding the partition into several apply
-goroutines (intra-node parallelism) or a faster core (the c2 result above), not batching.
-
----
-
-## Resharding
-
-```bash
-# Live reshard (default): source never freezes, target buffers writes during transfer, favours availability
-curl -X POST http://CP_IP:6060/reshard \
-  -H 'Content-Type: application/json' \
-  -d '{"source":"NODE0_IP:8080","target":"NODE2_IP:8080","partition":"_default"}'
-
-# Synchronous reshard: brief 503 window, no buffering on target
-curl -X POST http://CP_IP:6060/reshard \
-  -H 'Content-Type: application/json' \
-  -d '{"source":"NODE0_IP:8080","target":"NODE2_IP:8080","partition":"_default","live":false}'
-```
-
-**Live path (default):** target enters `Loading` state and buffers incoming writes while pulling the snapshot and WAL tail from the source. Once the transfer finishes the buffer replays into the partition. Source is never frozen, so write availability is uninterrupted.
-
-**Synchronous reshard (`live: false`):** control plane freezes the source (writers see 503), bumps the epoch, triggers the transfer, then thaws.
+serial apply worker, so the ways up are sharding the partition into several apply
+workers (intra-node parallelism) or a faster core (the c2 result above), not batching.
 
 ---
 
@@ -494,8 +674,7 @@ curl -X POST http://CP_IP:6060/reshard \
 ## Limitations
 
 **Consensus / epoch**
-- No Raft or Paxos; the control plane is a single sequencer and a disclosed SPOF for epoch assignment. Production would use etcd or ZooKeeper
-- Single control plane, so it is a SPOF for resharding and epoch assignment
+- No Raft or Paxos; the single control plane is a disclosed SPOF for epoch assignment and resharding. Production would use etcd or ZooKeeper
 - Only one epoch namespace (`_default`), so there is no true per-shard fencing if you add multiple logical partitions
 - Gateway epoch is in-memory; if the gateway and CP restart at the same time there is a brief window where the epoch could be stale
 - No two-phase quorum promotion; a replica is promoted by bumping the epoch via CP, not by a Paxos round
@@ -505,13 +684,18 @@ curl -X POST http://CP_IP:6060/reshard \
 - The SWIM member list is in-memory and repopulates from seeds within about 1s on restart
 - Without incarnation numbers, a falsely suspected node gets removed from the ring and has to rejoin
 - With multiple gateways, ring updates can lag by under a second via SWIM. During that window a write might go to the old or new node. Epoch fencing triggers a retry for the synchronous reshard path, but the live reshard path has no epoch bump so brief replica divergence is possible
+- The /reshard endpoint transfers an entire WAL from source to target without filtering by specific consistent-hash ranges. Target nodes acquire the historical data they need, but waste disk space storing historical keys they do not own.
+- The ring has no notion of zone/region; `Replicas(key, rf)` picks purely by hash proximity, and the Terraform deployment puts every node in one zone. RF=3 tolerates node failure but not a zone-level outage, since all replicas of a key can share the same failure domain
 
 **Replication**
 - Replicas are propagated asynchronously and can lag behind the primary
-- Reads always go to the primary, no read quorum is enforced
+- W=2 acks the write before the 3rd replica confirms; if that replica never catches up there is no anti-entropy or hinted handoff to repair it
+- `GET /aggregates` scatter-gathers every node's local, non-replicated view and merges it. A node mid-lag on replicated writes is queried, so the merged result can be momentarily stale with no read quorum to catch it
 - Resharding is manual; node death does not automatically trigger a rebalance or replica promotion
+- Reshard moves one partition source -> target; it does not detect or heal under-replication after a node death
 
 **Log / storage**
+- One apply worker per node serializes commits at ~10k writes/s; the fix is sharding the partition by key across workers (see [Findings](#findings-and-next-steps))
 - WAL is fsynced every 100ms, so up to 100ms of writes can be lost on a hard crash
 - No ordering guarantee across replicas; concurrent writes may be applied in different orders
 - Idempotency index is unbounded in memory and never cleared
@@ -528,6 +712,7 @@ curl -X POST http://CP_IP:6060/reshard \
 **Token bucket**
 - Buckets are per-key but per-gateway, so two gateways effectively double the allowed rate
 - No coordination across gateways
+- Idle keys are swept every minute, but the map is unbounded in concurrently-active keys; high key cardinality with no idle keys means a bucket per key held permanently in memory
 
 **Security**
 - All traffic is plaintext HTTP, no TLS
@@ -536,9 +721,11 @@ curl -X POST http://CP_IP:6060/reshard \
 ### Future work
 
 - **Two-phase routing transition:** coordinate ring updates across gateways before committing, closing the multi-gateway consistency window during resharding
-- **Read quorum:** enforce R quorum on reads so stale replicas cannot serve data; currently reads always go to the primary
+- **Freshness check on aggregate reads:** each node currently answers `/aggregates` from whatever it has locally, even if it is lagging on replicated writes; a lag/version signal per node would let the merge flag or exclude stale contributions
+- **Anti-entropy / hinted handoff:** background repair for replicas missed by the W-ack path
 - **Per-shard epoch fencing:** one epoch per logical partition instead of a single `_default` namespace
 - **Incarnation numbers:** per-node counter in SWIM so a falsely-suspected node can refute dead events before they propagate
 - **Per-key queue isolation:** intra-node fairness between keys; matters at high cardinality or skewed workloads
+- **Hot-key mitigation:** a single hot key is capped at one primary's throughput no matter how many nodes are in the cluster. Fix: temporarily add a second writer for that key with CRDT-merged aggregates, collapsing back to one once it cools down. The count merges cleanly (a G-counter: sum on merge, order-independent) and gets strong eventual consistency for free; windowed eviction does not, since it depends on wall-clock time at merge, not just which updates were received, so it would need its own timestamp-aware merge design
 - **Count-Min Sketch for top-K:** bound memory at high cardinality
 - **Global rate limiting:** coordinate token bucket state across gateways

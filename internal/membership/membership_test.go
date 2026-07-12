@@ -27,6 +27,18 @@ func TestJoinDissemination(t *testing.T) {
 }
 
 func TestDeadDetection(t *testing.T) {
+	t.Setenv("SWIM_PING_INTERVAL", "100ms")
+	t.Setenv("SWIM_PING_TIMEOUT", "100ms")
+	t.Setenv("SWIM_SUSPECT_TIMEOUT", "300ms")
+	pingInterval = durationEnv("SWIM_PING_INTERVAL", 2*time.Second)
+	pingTimeout = durationEnv("SWIM_PING_TIMEOUT", 1*time.Second)
+	suspectTimeout = durationEnv("SWIM_SUSPECT_TIMEOUT", 10*time.Second)
+	defer func() {
+		pingInterval = 2 * time.Second
+		pingTimeout = 1 * time.Second
+		suspectTimeout = 10 * time.Second
+	}()
+
 	m1, err := New("127.0.0.1:19003", "", nil)
 	if err != nil {
 		t.Fatal(err)

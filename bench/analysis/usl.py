@@ -56,6 +56,7 @@ def fit_usl(nodes, throughputs):
 
 
 def plot_curves(data, node_counts, title, out, xmax=None, ymax=None):
+    plt.rcParams.update({"font.size": plt.rcParams["font.size"] * 1.2})
     fig, ax = plt.subplots(figsize=(8, 5))
     for d, n in zip(data, node_counts):
         xs = [c["offered_rps"]   for c in d["curve"]]
@@ -75,11 +76,13 @@ def plot_curves(data, node_counts, title, out, xmax=None, ymax=None):
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=600)
+    plt.rcParams.update({"font.size": plt.rcParams["font.size"] / 1.2})
     print(f"curve plot saved to {out}")
 
 
 def plot_scaling(node_counts, peaks, alpha, beta, title, out, ymax=None):
+    plt.rcParams.update({"font.size": plt.rcParams["font.size"] * 1.2})
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(node_counts, peaks, "o-", label="measured peak", zorder=3)
 
@@ -105,7 +108,8 @@ def plot_scaling(node_counts, peaks, alpha, beta, title, out, ymax=None):
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=600)
+    plt.rcParams.update({"font.size": plt.rcParams["font.size"] / 1.2})
     print(f"scaling plot saved to {out}")
 
 

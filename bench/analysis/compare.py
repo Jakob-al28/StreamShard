@@ -30,6 +30,9 @@ def main():
     ap.add_argument("--title", default="Throughput comparison")
     ap.add_argument("--xmax", type=float, default=None,
                     help="clip x-axis (offered rps); does not affect reported peaks")
+    ap.add_argument("--ymax", type=float, default=None)
+    ap.add_argument("--colors", nargs="+", default=None,
+                    help="explicit color per series (e.g. #1a4e8a #2e7bc4 #6aaed6)")
     ap.add_argument("--out", type=Path, default=Path("compare.png"))
     args = ap.parse_args()
 
@@ -39,12 +42,14 @@ def main():
 
     data = [load(f) for f in args.files]
 
+    plt.rcParams.update({"font.size": plt.rcParams["font.size"] * 1.2})
     fig, ax = plt.subplots(figsize=(8, 5))
     peaks = []
-    for d, lbl in zip(data, labels):
+    colors = args.colors or [None] * len(data)
+    for d, lbl, col in zip(data, labels, colors):
         xs = [c["offered_rps"] for c in d["curve"]]
         ys = [c["committed_rps"] for c in d["curve"]]
-        ax.plot(xs, ys, "o-", markersize=4, label=lbl)
+        ax.plot(xs, ys, "o-", markersize=4, label=lbl, **({"color": col} if col else {}))
         peak = max(d["curve"], key=lambda c: c["committed_rps"])
         peaks.append((lbl, peak["committed_rps"], peak["offered_rps"]))
 
@@ -54,6 +59,8 @@ def main():
             label="offered = committed")
     if args.xmax:
         ax.set_xlim(0, args.xmax)
+    if args.ymax:
+        ax.set_ylim(0, args.ymax)
 
     ax.set_xlabel("offered load (rps)")
     ax.set_ylabel("committed writes / s")
@@ -61,7 +68,7 @@ def main():
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(args.out, dpi=150)
+    fig.savefig(args.out, dpi=600)
 
     print(f"saved {args.out}")
     for lbl, pk, at in peaks:

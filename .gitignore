@@ -17,3 +17,5 @@ vendor/
 
 # python venv
 bench/analysis/venv/
+
+demo/.run*

@@ -17,10 +17,12 @@ type Entry struct {
 	Timestamp time.Time
 }
 
+const dedupTTL = 5 * time.Minute
+
 type Log struct {
 	entries      []Entry
 	baseOffset   uint64
-	index        map[string]struct{}
+	dedup        *dedupSet
 	wal          *os.File
 	dir          string
 	mu           sync.Mutex
@@ -44,7 +46,7 @@ func New() *Log {
 }
 
 func Open(dir string) (*Log, error) {
-	l := &Log{index: make(map[string]struct{}), dir: dir}
+	l := &Log{dedup: newDedupSet(dedupTTL), dir: dir}
 	if dir == "" {
 		return l, nil
 	}
@@ -63,16 +65,19 @@ func Open(dir string) (*Log, error) {
 		return nil, err
 	}
 	scanner := bufio.NewScanner(f)
+	replayed := make(map[string]struct{})
 	for scanner.Scan() {
 		var e Entry
 		if json.Unmarshal(scanner.Bytes(), &e) == nil {
-			if _, dup := l.index[e.ID]; !dup {
+			if _, dup := replayed[e.ID]; !dup {
 				e.Offset = l.baseOffset + uint64(len(l.entries))
 				l.entries = append(l.entries, e)
-				l.index[e.ID] = struct{}{}
+				replayed[e.ID] = struct{}{}
+				l.dedup.add(e.ID, e.Timestamp)
 			}
 		}
 	}
+	l.dedup.evict(time.Now())
 	l.wal = f
 	go l.fsyncer()
 	return l, nil
@@ -105,8 +110,9 @@ func (l *Log) fsyncer() {
 func (l *Log) Append(id, key string, value []byte) (Entry, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := time.Now()
 	if !l.noIdempotent {
-		if _, dup := l.index[id]; dup {
+		if l.dedup.seen(id, now) {
 			return Entry{}, false
 		}
 	}
@@ -115,10 +121,10 @@ func (l *Log) Append(id, key string, value []byte) (Entry, bool) {
 		ID:        id,
 		Key:       key,
 		Value:     value,
-		Timestamp: time.Now(),
+		Timestamp: now,
 	}
 	l.entries = append(l.entries, e)
-	l.index[e.ID] = struct{}{}
+	l.dedup.add(e.ID, now)
 	if l.wal != nil {
 		b, _ := json.Marshal(e)
 		b = append(b, '\n')
@@ -141,7 +147,7 @@ func (l *Log) AppendBatch(ids, keys []string, values [][]byte) ([]Entry, []bool)
 	now := time.Now()
 	for i := 0; i < n; i++ {
 		if !l.noIdempotent {
-			if _, dup := l.index[ids[i]]; dup {
+			if l.dedup.seen(ids[i], now) {
 				continue
 			}
 		}
@@ -153,7 +159,7 @@ func (l *Log) AppendBatch(ids, keys []string, values [][]byte) ([]Entry, []bool)
 			Timestamp: now,
 		}
 		l.entries = append(l.entries, e)
-		l.index[e.ID] = struct{}{}
+		l.dedup.add(e.ID, now)
 		entries[i] = e
 		fresh[i] = true
 		if l.wal != nil {
@@ -248,3 +254,52 @@ func (l *Log) Compact(snap Snapshot) error {
 	}
 	return nil
 }
+
+type dedupSet struct {
+	ttl     time.Duration
+	buckets map[int64]map[string]struct{}
+	at      map[string]int64
+}
+
+func newDedupSet(ttl time.Duration) *dedupSet {
+	return &dedupSet{
+		ttl:     ttl,
+		buckets: make(map[int64]map[string]struct{}),
+		at:      make(map[string]int64),
+	}
+}
+
+func (d *dedupSet) seen(id string, now time.Time) bool {
+	d.evict(now)
+	_, ok := d.at[id]
+	return ok
+}
+
+func (d *dedupSet) add(id string, now time.Time) {
+	if _, ok := d.at[id]; ok {
+		return
+	}
+	b := now.Unix()
+	bucket := d.buckets[b]
+	if bucket == nil {
+		bucket = make(map[string]struct{})
+		d.buckets[b] = bucket
+	}
+	bucket[id] = struct{}{}
+	d.at[id] = b
+}
+
+func (d *dedupSet) evict(now time.Time) {
+	cutoff := now.Add(-d.ttl).Unix()
+	for b, bucket := range d.buckets {
+		if b > cutoff {
+			continue
+		}
+		for id := range bucket {
+			delete(d.at, id)
+		}
+		delete(d.buckets, b)
+	}
+}
+
+func (d *dedupSet) len() int { return len(d.at) }
